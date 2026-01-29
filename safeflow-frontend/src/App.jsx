@@ -239,6 +239,7 @@ export default function App() {
             <textarea
               id="answer"
               name="answer"
+              aria-describedby="answer-help"
               ref={answerRef}
               value={form.answer}
               onChange={(e) =>
