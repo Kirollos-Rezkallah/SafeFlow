@@ -1,0 +1,17 @@
+# Node
+node_modules/
+
+# Environment
+.env
+
+# Runtime data (draft storage)
+data/drafts.json
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
