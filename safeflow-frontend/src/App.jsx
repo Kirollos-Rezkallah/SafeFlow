@@ -1,21 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ConfirmDialog from "./components/ConfirmDialogue.jsx";
+import { loginWithEmail } from "./api.js";
 import { deleteDraft, restoreDraft, useAutosave } from "./hooks/useAutosave.js";
 
-function makeStorageKey(userEmail) {
-  // Per-user draft storage
-  return `safeflow:draft:${userEmail.trim().toLowerCase()}`;
-}
-
 export default function App() {
-  const [userEmail, setUserEmail] = useState("");
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [email, setEmail] = useState("");
 
-  const [showRestore, setShowRestore] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [userId, setUserId] = useState(null);
+
   const [restorableDraft, setRestorableDraft] = useState(null);
+  const [showRestore, setShowRestore] = useState(false);
 
   const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
+
+  const [announcement, setAnnouncement] = useState("");
 
   const [form, setForm] = useState({
     examTitle: "Accessible Web Basics",
@@ -26,70 +26,91 @@ export default function App() {
 
   const answerRef = useRef(null);
 
-  const storageKey = useMemo(() => {
-    if (!userEmail) return null;
-    return makeStorageKey(userEmail);
-  }, [userEmail]);
+  const autosaveEnabled = isLoggedIn && Boolean(userId);
 
-  const autosaveEnabled = isLoggedIn && Boolean(storageKey);
-
-  const { lastSavedAt, isSaving } = useAutosave({
-    storageKey: storageKey ?? "noop",
+  const { lastSavedAt, isSaving, saveError } = useAutosave({
+    userId,
     data: form,
     enabled: autosaveEnabled,
     intervalMs: 3000,
   });
 
-  // On login, check for restorable draft and ask user what to do (not silent)
+  // After login, check backend for existing draft and ask user what to do
   useEffect(() => {
-    if (!isLoggedIn || !storageKey) return;
+    if (!isLoggedIn || !userId) return;
 
-    const draft = restoreDraft(storageKey);
-    if (draft?.data) {
-      setRestorableDraft(draft);
-      setShowRestore(true);
-    } else {
-      // No draft, focus the answer for fast keyboard use
-      window.setTimeout(() => answerRef.current?.focus(), 0);
-    }
-  }, [isLoggedIn, storageKey]);
+    let alive = true;
 
-  // Warn before leaving if there is meaningful unsent work
+    (async () => {
+      try {
+        const draft = await restoreDraft(userId);
+        if (!alive) return;
+
+        if (draft?.data) {
+          setRestorableDraft(draft);
+          setShowRestore(true);
+        } else {
+          window.setTimeout(() => answerRef.current?.focus(), 0);
+        }
+      } catch (e) {
+        if (!alive) return;
+        setAnnouncement(e?.message || "Failed to load draft");
+        window.setTimeout(() => answerRef.current?.focus(), 0);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [isLoggedIn, userId]);
+
+  // Warn before real page exit if there is meaningful work
   useEffect(() => {
-    if (!autosaveEnabled || !storageKey) return;
+    if (!autosaveEnabled || !userId) return;
 
     const hasWork = Boolean(form.answer.trim()) || form.agree;
 
     const onBeforeUnload = (e) => {
       if (!hasWork) return;
-      // Native browser dialog (best effort) for real page exits
       e.preventDefault();
       e.returnValue = "";
     };
 
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [autosaveEnabled, storageKey, form.answer, form.agree]);
+  }, [autosaveEnabled, userId, form.answer, form.agree]);
 
-  function handleLoginSubmit(e) {
+  async function handleLoginSubmit(e) {
     e.preventDefault();
-    const trimmed = userEmail.trim();
+    const trimmed = email.trim();
     if (!trimmed) return;
-    setIsLoggedIn(true);
+
+    setAnnouncement("");
+
+    try {
+      const res = await loginWithEmail(trimmed);
+      setUserId(res.userId);
+      setIsLoggedIn(true);
+    } catch (err) {
+      setAnnouncement(err?.message || "Login failed");
+    }
   }
 
   function handleRestoreContinue() {
-    if (restorableDraft?.data) {
-      setForm(restorableDraft.data);
-    }
+    if (restorableDraft?.data) setForm(restorableDraft.data);
     setShowRestore(false);
     window.setTimeout(() => answerRef.current?.focus(), 0);
   }
 
-  function handleRestoreDiscard() {
-    if (storageKey) deleteDraft(storageKey);
+  async function handleRestoreDiscard() {
+    try {
+      if (userId) await deleteDraft(userId);
+    } catch {
+      // ignore for MVP
+    }
+
+    setForm((p) => ({ ...p, answer: "", agree: false }));
     setShowRestore(false);
-    setForm((prev) => ({ ...prev, answer: "", agree: false }));
     window.setTimeout(() => answerRef.current?.focus(), 0);
   }
 
@@ -98,20 +119,18 @@ export default function App() {
     setShowSubmitConfirm(true);
   }
 
-  function handleConfirmSubmit() {
+  async function handleConfirmSubmit() {
     setShowSubmitConfirm(false);
 
-    // Demo behavior: clear draft and show a status alert
-    if (storageKey) deleteDraft(storageKey);
+    try {
+      if (userId) await deleteDraft(userId);
+    } catch {
+      // ignore for MVP
+    }
 
-    // Reset "exam attempt"
-    setForm((prev) => ({ ...prev, answer: "", agree: false }));
-
-    // Keep focus predictable for keyboard users
+    setForm((p) => ({ ...p, answer: "", agree: false }));
+    setAnnouncement("Submitted. Your server draft was cleared.");
     window.setTimeout(() => answerRef.current?.focus(), 0);
-
-    // Minimal success feedback (use aria-live region below too)
-    setAnnouncement("Submitted. Your draft was cleared.");
   }
 
   function handleLogoutAttempt() {
@@ -120,31 +139,33 @@ export default function App() {
 
   function handleConfirmExit() {
     setShowExitConfirm(false);
+
     setIsLoggedIn(false);
-    setUserEmail("");
+    setUserId(null);
+    setEmail("");
     setRestorableDraft(null);
     setShowRestore(false);
     setShowSubmitConfirm(false);
+
     setAnnouncement("");
   }
-
-  function handleCancelExit() {
-    setShowExitConfirm(false);
-  }
-
-  const [announcement, setAnnouncement] = useState("");
 
   if (!isLoggedIn) {
     return (
       <main className="container">
         <h1>SafeFlow MVP</h1>
         <p className="card">
-          Demo: continuous auto-save per user, restore after reload, and
+          Demo: server-backed auto-save per user, restore after reload, and
           confirmation before submit or exit. Keyboard-first.
         </p>
 
         <section className="card" aria-labelledby="login-title">
           <h2 id="login-title">Sign in</h2>
+
+          {/* Status messages */}
+          <div aria-live="polite" className="sr-only">
+            {announcement}
+          </div>
 
           <form className="row" onSubmit={handleLoginSubmit}>
             <div className="row">
@@ -157,8 +178,8 @@ export default function App() {
                 type="email"
                 autoComplete="email"
                 required
-                value={userEmail}
-                onChange={(e) => setUserEmail(e.target.value)}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
               />
             </div>
 
@@ -177,7 +198,7 @@ export default function App() {
     <main className="container">
       <h1>SafeFlow MVP</h1>
 
-      {/* Status messages for assistive tech */}
+      {/* Status messages */}
       <div aria-live="polite" className="sr-only">
         {announcement}
       </div>
@@ -185,7 +206,8 @@ export default function App() {
       <section className="card" aria-labelledby="exam-title">
         <div className="actions" style={{ justifyContent: "space-between" }}>
           <div className="status" aria-live="polite">
-            <span className="badge">Signed in as {userEmail}</span>
+            <span className="badge">Signed in as {email}</span>
+            <span className="badge">UserId {userId}</span>
             <span className="badge">
               {isSaving
                 ? "Saving..."
@@ -193,6 +215,9 @@ export default function App() {
                   ? `Saved ${formatTime(lastSavedAt)}`
                   : "Not saved yet"}
             </span>
+            {saveError ? (
+              <span className="badge">Save error: {saveError}</span>
+            ) : null}
           </div>
 
           <button onClick={handleLogoutAttempt}>Exit</button>
@@ -221,8 +246,8 @@ export default function App() {
               }
             />
             <div className="status" id="answer-help">
-              Tip: Try reloading the page. You should be offered a restore
-              option.
+              Tip: type, wait 3 seconds, then refresh the page. You should be
+              offered a restore option from the server.
             </div>
           </div>
 
@@ -246,12 +271,17 @@ export default function App() {
               disabled={!form.answer.trim() || !form.agree}>
               Submit exam
             </button>
+
             <button
               type="button"
-              onClick={() => {
-                if (storageKey) deleteDraft(storageKey);
+              onClick={async () => {
+                try {
+                  if (userId) await deleteDraft(userId);
+                } catch {
+                  // ignore for MVP
+                }
                 setForm((p) => ({ ...p, answer: "", agree: false }));
-                setAnnouncement("Draft cleared.");
+                setAnnouncement("Server draft cleared.");
                 window.setTimeout(() => answerRef.current?.focus(), 0);
               }}>
               Clear draft
@@ -260,11 +290,11 @@ export default function App() {
         </form>
       </section>
 
-      {/* Restore dialog shown intentionally, user chooses */}
+      {/* Restore prompt, user decides */}
       <ConfirmDialog
         open={showRestore}
         title="Restore progress"
-        description="We found saved progress for this exam. Do you want to continue where you left off, or discard it?"
+        description="We found saved progress on the server. Do you want to continue where you left off, or discard it?"
         confirmText="Continue"
         cancelText="Discard"
         onConfirm={handleRestoreContinue}
@@ -292,7 +322,7 @@ export default function App() {
         cancelText="Stay"
         danger
         onConfirm={handleConfirmExit}
-        onCancel={handleCancelExit}
+        onCancel={() => setShowExitConfirm(false)}
       />
     </main>
   );
